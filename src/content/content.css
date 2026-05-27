@@ -1,6 +1,131 @@
 /* TimeLens 柔性干预卡片样式注入 */
+@import "../styles/shadcn-theme.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* 可以在这里添加一些针对遮罩层特有的全局样式，目前主要通过 content.tsx 内联样式实现 */
+.timelens-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 999999999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+.timelens-card {
+  width: min(92vw, 420px);
+  border-radius: 24px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+  color: hsl(var(--card-foreground));
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+  padding: 28px;
+  text-align: center;
+}
+
+.timelens-card-emoji {
+  margin-bottom: 12px;
+  font-size: 44px;
+  line-height: 1;
+}
+
+.timelens-card-title {
+  margin: 0 0 10px;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.timelens-card-message {
+  margin: 0 0 24px;
+  color: hsl(var(--muted-foreground));
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.timelens-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.timelens-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  padding: 12px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.timelens-button:hover {
+  transform: translateY(-1px);
+}
+
+.timelens-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  transform: none;
+}
+
+.timelens-button-primary {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}
+
+.timelens-button-primary:hover {
+  background: hsl(var(--primary) / 0.9);
+}
+
+.timelens-button-warning {
+  display: none;
+  background: #f59e0b;
+  color: white;
+}
+
+.timelens-button-warning:hover {
+  background: #d97706;
+}
+
+.timelens-divider {
+  height: 1px;
+  margin: 20px 0 16px;
+  background: hsl(var(--border));
+}
+
+.timelens-subtitle {
+  margin-bottom: 12px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+
+.timelens-extend-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.timelens-button-secondary {
+  background: hsl(var(--secondary));
+  color: hsl(var(--secondary-foreground));
+}
+
+.timelens-button-secondary:hover {
+  background: hsl(var(--accent));
+}
+
+.timelens-extend-grid.is-disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}

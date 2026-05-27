@@ -1,5 +1,11 @@
 import { StorageManager } from '../utils/storage';
 import { TagDatabase } from '../utils/tags';
+import {
+  DOMAIN_INTERVENTION_THRESHOLD,
+  GLOBAL_FATIGUE_THRESHOLD,
+  PRE_BLUR_SECONDS,
+  REST_DURATION_SECONDS
+} from '../constants/intervention';
 
 // --- 状态管理 ---
 interface ActiveTabState {
@@ -22,15 +28,15 @@ const todayDomainDurations: Record<string, number> = {};
 let globalContinuousDuration = 0;
 let isGlobalResting = false; // 是否正处于全局强制休息状态
 let globalRestEndTime = 0; // 全局休息结束的时间戳
+let isGlobalRestPaused = false; // 全局休息是否暂停
+let remainingGlobalRestTime = 0; // 暂停时记录剩余时间
+
 const domainRestEndTimes: Record<string, number> = {}; // 记录各个单站休息结束的时间戳
+const domainRestPausedState: Record<string, { isPaused: boolean, remainingTime: number }> = {}; // 单站暂停状态
 
-// 设定干预阈值：为了测试方便，单域限制改为 10 秒，全局疲劳限制改为 15 秒
-const DOMAIN_INTERVENTION_THRESHOLD = 10; 
-const GLOBAL_FATIGUE_THRESHOLD = 15; 
-
-// 延长的时间
-const EXTEND_SECONDS = 30 * 60;
-console.log(EXTEND_SECONDS); // 避免 TS 警告
+// 记录是否已经发送过预警，防止重复发送
+let globalPreBlurSent = false;
+const domainPreBlurSent: Record<string, boolean> = {};
 
 // 使用 Alarms API 代替 setInterval 以符合 Manifest V3 规范
 // (Service Worker 可能会被浏览器休眠，alarms 可以在休眠时唤醒)
@@ -106,36 +112,44 @@ async function checkIntervention(domain: string, tabId: number) {
   const now = Date.now();
 
   // 0. 检查是否正在处于休息倒计时中（恢复被刷新的页面状态）
-  if (globalRestEndTime > now) {
+  if (globalRestEndTime > now || isGlobalRestPaused) {
     try {
       await chrome.tabs.sendMessage(tabId, { 
         action: 'REST_IN_PROGRESS', 
         type: 'global',
-        timeLeft: Math.ceil((globalRestEndTime - now) / 1000)
+        timeLeft: isGlobalRestPaused ? remainingGlobalRestTime : Math.ceil((globalRestEndTime - now) / 1000)
       });
     } catch (e) {}
     return;
   }
   
-  if (domainRestEndTimes[domain] && domainRestEndTimes[domain] > now) {
+  const domainState = domainRestPausedState[domain] || { isPaused: false, remainingTime: 0 };
+  if ((domainRestEndTimes[domain] && domainRestEndTimes[domain] > now) || domainState.isPaused) {
     try {
       await chrome.tabs.sendMessage(tabId, { 
         action: 'REST_IN_PROGRESS', 
         type: 'domain',
-        timeLeft: Math.ceil((domainRestEndTimes[domain] - now) / 1000)
+        timeLeft: domainState.isPaused ? domainState.remainingTime : Math.ceil((domainRestEndTimes[domain] - now) / 1000)
       });
     } catch (e) {}
     return;
   }
 
-  // 1. 全局疲劳检查 (最高优先级)
-  if (globalContinuousDuration >= GLOBAL_FATIGUE_THRESHOLD) {
+  // 1. 全局疲劳预警与检查 (最高优先级)
+  if (globalContinuousDuration >= GLOBAL_FATIGUE_THRESHOLD - PRE_BLUR_SECONDS && globalContinuousDuration < GLOBAL_FATIGUE_THRESHOLD) {
+    if (!globalPreBlurSent) {
+      console.log(`[TimeLens] Global pre-blur warning at ${globalContinuousDuration}s`);
+      await broadcastMessage({ action: 'PRE_BLUR_WARNING', type: 'global' });
+      globalPreBlurSent = true;
+    }
+  } else if (globalContinuousDuration >= GLOBAL_FATIGUE_THRESHOLD) {
     console.log(`[TimeLens] Global fatigue threshold reached (${globalContinuousDuration}s), triggering global intervention...`);
     isGlobalResting = true;
+    globalPreBlurSent = false; // 重置
     await broadcastMessage({ 
       action: 'BLUR_PAGE', 
       type: 'global',
-      message: '你已连续用眼过久。为了保护视力，请强制休息 5 分钟。'
+      message: '你已连续用眼过久。为了保护视力，请强制休息 10 分钟。'
     });
     return; // 全局触发后不再判断单站
   }
@@ -152,15 +166,24 @@ async function checkIntervention(domain: string, tabId: number) {
     return;
   }
 
-  // 3. 单域限制检查
+  // 3. 单域限制预警与检查
   // 如果是白名单 (默认 Tools/Work 豁免，具体可根据 PRD 优化，这里暂做简单示范)
   const { tags } = TagDatabase.getTags(domain);
   if (tags.includes('Work') || tags.includes('Tools')) return;
 
   const totalDuration = todayDomainDurations[domain] || 0;
   
-  if (totalDuration >= DOMAIN_INTERVENTION_THRESHOLD) {
+  if (totalDuration >= DOMAIN_INTERVENTION_THRESHOLD - PRE_BLUR_SECONDS && totalDuration < DOMAIN_INTERVENTION_THRESHOLD) {
+    if (!domainPreBlurSent[domain]) {
+      console.log(`[TimeLens] Domain pre-blur warning for ${domain} at ${totalDuration}s`);
+      try {
+        await chrome.tabs.sendMessage(tabId, { action: 'PRE_BLUR_WARNING', type: 'domain' });
+        domainPreBlurSent[domain] = true;
+      } catch (e) {}
+    }
+  } else if (totalDuration >= DOMAIN_INTERVENTION_THRESHOLD) {
     console.log(`[TimeLens] Domain threshold reached for ${domain}, triggering domain intervention...`);
+    domainPreBlurSent[domain] = false; // 重置
     try {
       // 向当前标签页发送模糊页面的消息
       await chrome.tabs.sendMessage(tabId, { 
@@ -313,6 +336,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       if (globalContinuousDuration < 0) globalContinuousDuration = 0;
       isGlobalResting = false;
       globalRestEndTime = 0;
+      isGlobalRestPaused = false;
+      globalPreBlurSent = false;
       // 广播解除模糊
       broadcastMessage({ action: 'REMOVE_BLUR' });
     } else {
@@ -323,24 +348,64 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           todayDomainDurations[currentTab.domain] = 0;
         }
         domainRestEndTimes[currentTab.domain] = 0;
+        domainPreBlurSent[currentTab.domain] = false;
+        if (domainRestPausedState[currentTab.domain]) {
+          domainRestPausedState[currentTab.domain].isPaused = false;
+        }
       }
     }
     sendResponse({ status: 'extended' });
   } else if (request.action === 'START_REST') {
     console.log('[TimeLens] User started resting');
-    const restSeconds = 300; // 5分钟
+    const restSeconds = REST_DURATION_SECONDS;
     const endTime = Date.now() + restSeconds * 1000;
 
     if (request.type === 'global') {
       globalRestEndTime = endTime;
+      isGlobalRestPaused = false;
       // 广播给所有页面，同步倒计时
-      broadcastMessage({ action: 'SYNC_REST_TIMER', timeLeft: restSeconds });
+      broadcastMessage({ action: 'SYNC_REST_TIMER', timeLeft: restSeconds, isPaused: false });
     } else {
       if (currentTab.domain) {
         domainRestEndTimes[currentTab.domain] = endTime;
+        domainRestPausedState[currentTab.domain] = { isPaused: false, remainingTime: restSeconds };
       }
     }
     sendResponse({ status: 'rest_started', endTime });
+  } else if (request.action === 'TOGGLE_PAUSE_REST') {
+    console.log(`[TimeLens] User toggled rest pause: ${request.isPaused}`);
+    const now = Date.now();
+    
+    if (request.type === 'global') {
+      isGlobalRestPaused = request.isPaused;
+      if (isGlobalRestPaused) {
+        // 记录暂停时的剩余时间
+        remainingGlobalRestTime = Math.ceil((globalRestEndTime - now) / 1000);
+      } else {
+        // 恢复时，基于剩余时间重新计算结束时间戳
+        globalRestEndTime = now + remainingGlobalRestTime * 1000;
+      }
+      // 广播暂停状态给所有页面
+      broadcastMessage({ 
+        action: 'SYNC_REST_TIMER', 
+        timeLeft: isGlobalRestPaused ? remainingGlobalRestTime : Math.ceil((globalRestEndTime - now) / 1000),
+        isPaused: isGlobalRestPaused 
+      });
+    } else {
+      if (currentTab.domain) {
+        if (!domainRestPausedState[currentTab.domain]) {
+          domainRestPausedState[currentTab.domain] = { isPaused: false, remainingTime: 0 };
+        }
+        domainRestPausedState[currentTab.domain].isPaused = request.isPaused;
+        
+        if (request.isPaused) {
+          domainRestPausedState[currentTab.domain].remainingTime = Math.ceil((domainRestEndTimes[currentTab.domain] - now) / 1000);
+        } else {
+          domainRestEndTimes[currentTab.domain] = now + domainRestPausedState[currentTab.domain].remainingTime * 1000;
+        }
+      }
+    }
+    sendResponse({ status: 'pause_toggled' });
   } else if (request.action === 'REST_COMPLETED') {
     console.log('[TimeLens] User completed rest');
     
@@ -348,12 +413,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       globalContinuousDuration = 0; // 重置全局疲劳
       isGlobalResting = false;
       globalRestEndTime = 0;
+      globalPreBlurSent = false;
       broadcastMessage({ action: 'REMOVE_BLUR' });
     } else {
       // 单站休息完成
       if (currentTab.domain) {
          todayDomainDurations[currentTab.domain] -= (60 * 60); // 奖励1小时
          domainRestEndTimes[currentTab.domain] = 0;
+         domainPreBlurSent[currentTab.domain] = false;
       }
     }
     sendResponse({ status: 'rest_recorded' });
@@ -362,3 +429,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // --- 初始化入口 ---
 syncCurrentActiveTab();
+
+// 监听扩展图标点击，打开侧边栏
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((error) => console.error(error));

@@ -1,112 +1,199 @@
 // TimeLens 柔性干预 Content Script
+import { createRoot, type Root } from 'react-dom/client';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle
+} from '@/components/ui/card';
+import {
+  EXTEND_OPTIONS_MINUTES,
+  MAX_BLUR_PX,
+  REST_DURATION_SECONDS
+} from '../constants/intervention';
+import { formatCountdown } from '../lib/format';
 import './content.css';
 
-// 确保只注入一次
+type InterventionType = 'domain' | 'global';
+
+interface InterventionCardProps {
+  message: string;
+  isRestingActive: boolean;
+  isRestPaused: boolean;
+  remainingRestTime: number;
+  onRest: () => void;
+  onTogglePauseRest: () => void;
+  onExtend: (minutes: number) => void;
+}
+
+const InterventionCard = ({
+  message,
+  isRestingActive,
+  isRestPaused,
+  remainingRestTime,
+  onRest,
+  onTogglePauseRest,
+  onExtend
+}: InterventionCardProps) => {
+  const primaryText = !isRestingActive
+    ? '开始休息 10 分钟'
+    : isRestPaused
+      ? '休息已暂停'
+      : `正在休息... (${formatCountdown(remainingRestTime)})`;
+
+  return (
+    <Card
+      id="timelens-card"
+      className="w-[min(92vw,420px)] rounded-[28px] border-white/70 bg-white/95 text-center shadow-[0_24px_60px_rgba(15,23,42,0.18)]"
+    >
+      <CardHeader className="items-center pb-4">
+        <div className="mb-1 text-[44px] leading-none">🌱</div>
+        <CardTitle className="text-[26px] font-bold text-[#111827]">该休息一下了</CardTitle>
+        <CardDescription className="max-w-[320px] text-sm leading-6 text-muted-foreground">
+          {message}
+        </CardDescription>
+      </CardHeader>
+
+      <CardContent className="space-y-5">
+        <div className="space-y-3">
+          <Button
+            className="h-11 w-full rounded-xl"
+            disabled={isRestingActive}
+            onClick={onRest}
+          >
+            {primaryText}
+          </Button>
+
+          {isRestingActive ? (
+            <Button
+              variant={isRestPaused ? 'default' : 'secondary'}
+              className="h-11 w-full rounded-xl"
+              onClick={onTogglePauseRest}
+            >
+              {isRestPaused ? '恢复休息' : '暂停休息'}
+            </Button>
+          ) : null}
+        </div>
+
+        <div className="h-px bg-border" />
+
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">如果需要紧急处理，可以选择延长：</p>
+          <div className="grid grid-cols-3 gap-2">
+            {EXTEND_OPTIONS_MINUTES.map((minutes) => (
+              <Button
+                key={minutes}
+                variant="outline"
+                className="rounded-xl px-0 text-xs"
+                disabled={isRestingActive && !isRestPaused}
+                onClick={() => onExtend(minutes)}
+              >
+                + {minutes} 分钟
+              </Button>
+            ))}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+};
+
 if (!(window as any).__TIMELENS_INJECTED) {
   (window as any).__TIMELENS_INJECTED = true;
 
-  // 当前干预类型
-  let currentInterventionType = 'domain';
+  let currentInterventionType: InterventionType = 'domain';
   let restTimer: number | null = null;
+  let isRestPaused = false;
+  let remainingRestTime = 0;
+  let isRestingActive = false;
+  let currentMessage = '';
+  let overlayHost: HTMLDivElement | null = null;
+  let overlayRoot: Root | null = null;
+  let showCard = false;
 
-  // 创建遮罩层容器
-  const createOverlay = (message: string, type: string) => {
-    // 检查是否已存在
-    if (document.getElementById('timelens-intervention-overlay')) return;
-    
-    currentInterventionType = type;
+  const ensureOverlayHost = () => {
+    if (!overlayHost) {
+      overlayHost = document.createElement('div');
+      overlayHost.id = 'timelens-intervention-overlay';
+      overlayHost.className = 'timelens-overlay';
+      document.body.appendChild(overlayHost);
+      overlayRoot = createRoot(overlayHost);
+    }
 
-    const overlay = document.createElement('div');
-    overlay.id = 'timelens-intervention-overlay';
-    
-    // 应用内联样式以确保不受宿主网站样式污染 (同时使用 shadow DOM 可以更好隔离，这里为简单直观直接用内联)
-    Object.assign(overlay.style, {
+    Object.assign(overlayHost.style, {
       position: 'fixed',
       top: '0',
       left: '0',
       width: '100vw',
       height: '100vh',
-      backgroundColor: 'rgba(255, 255, 255, 0.3)',
-      backdropFilter: 'blur(12px)',
-      WebkitBackdropFilter: 'blur(12px)',
       zIndex: '999999999',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      fontFamily: 'system-ui, -apple-system, sans-serif',
-      opacity: '0',
-      transition: 'opacity 0.8s ease-in-out' // 柔性渐显
+      fontFamily: 'system-ui, -apple-system, sans-serif'
+    });
+  };
+
+  const renderOverlay = () => {
+    if (!overlayRoot) return;
+
+    overlayRoot.render(
+      showCard ? (
+        <InterventionCard
+          message={currentMessage}
+          isRestingActive={isRestingActive}
+          isRestPaused={isRestPaused}
+          remainingRestTime={remainingRestTime}
+          onRest={handleRest}
+          onTogglePauseRest={handleTogglePauseRest}
+          onExtend={handleExtend}
+        />
+      ) : (
+        <></>
+      )
+    );
+  };
+
+  const createOverlay = (message: string, type: InterventionType) => {
+    currentInterventionType = type;
+    currentMessage = message;
+    showCard = true;
+    ensureOverlayHost();
+
+    Object.assign(overlayHost!.style, {
+      backgroundColor: 'rgba(255, 255, 255, 0.3)',
+      backdropFilter: `blur(${MAX_BLUR_PX}px)`,
+      WebkitBackdropFilter: `blur(${MAX_BLUR_PX}px)`,
+      opacity: '1',
+      transition: 'opacity 0.8s ease-in-out, backdrop-filter 10s linear'
     });
 
-    // 提示卡片 HTML
-    overlay.innerHTML = `
-      <div style="
-        background: white;
-        padding: 40px;
-        border-radius: 24px;
-        box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-        text-align: center;
-        max-width: 400px;
-        border: 1px solid #f0f0f0;
-        transform: translateY(20px);
-        transition: transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-      " id="timelens-card">
-        <div style="font-size: 48px; margin-bottom: 16px;">🌱</div>
-        <h2 style="margin: 0 0 12px 0; color: #111827; font-size: 24px; font-weight: 700;">该休息一下了</h2>
-        <p style="color: #4B5563; font-size: 15px; line-height: 1.6; margin-bottom: 32px;">
-          ${message}
-        </p>
-        <div style="display: flex; flex-direction: column; gap: 12px;">
-          <button id="tl-btn-rest" style="
-            background: #10B981;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 12px;
-            font-size: 15px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-          ">休息 5 分钟</button>
-          <button id="tl-btn-extend" style="
-            background: #F3F4F6;
-            color: #4B5563;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 12px;
-            font-size: 15px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.2s;
-          ">再延长 30 分钟</button>
-        </div>
-      </div>
-    `;
+    renderOverlay();
+  };
 
-    document.body.appendChild(overlay);
+  const createPreBlurOverlay = () => {
+    if (overlayHost) return;
 
-    // 触发动画
+    ensureOverlayHost();
+    showCard = false;
+    renderOverlay();
+
+    Object.assign(overlayHost!.style, {
+      backgroundColor: 'rgba(255, 255, 255, 0)',
+      backdropFilter: 'blur(0px)',
+      WebkitBackdropFilter: 'blur(0px)',
+      opacity: '1',
+      transition: 'backdrop-filter 10s linear, background-color 10s linear, opacity 0.8s ease-in-out'
+    });
+
     requestAnimationFrame(() => {
-      overlay.style.opacity = '1';
-      const card = document.getElementById('timelens-card');
-      if (card) card.style.transform = 'translateY(0)';
+      if (!overlayHost) return;
+      overlayHost.style.backdropFilter = `blur(${MAX_BLUR_PX}px)`;
+      (overlayHost.style as any).WebkitBackdropFilter = `blur(${MAX_BLUR_PX}px)`;
+      overlayHost.style.backgroundColor = 'rgba(255, 255, 255, 0.3)';
     });
-
-    // 绑定事件
-    const btnRest = document.getElementById('tl-btn-rest');
-    const btnExtend = document.getElementById('tl-btn-extend');
-
-    if (btnRest) {
-      btnRest.addEventListener('mouseenter', () => btnRest.style.backgroundColor = '#059669');
-      btnRest.addEventListener('mouseleave', () => btnRest.style.backgroundColor = '#10B981');
-      btnRest.addEventListener('click', handleRest);
-    }
-
-    if (btnExtend) {
-      btnExtend.addEventListener('mouseenter', () => btnExtend.style.backgroundColor = '#E5E7EB');
-      btnExtend.addEventListener('mouseleave', () => btnExtend.style.backgroundColor = '#F3F4F6');
-      btnExtend.addEventListener('click', handleExtend);
-    }
   };
 
   const removeOverlay = () => {
@@ -114,81 +201,81 @@ if (!(window as any).__TIMELENS_INJECTED) {
       clearInterval(restTimer);
       restTimer = null;
     }
-    const overlay = document.getElementById('timelens-intervention-overlay');
-    if (overlay) {
-      overlay.style.opacity = '0';
-      setTimeout(() => overlay.remove(), 800);
+
+    isRestPaused = false;
+    remainingRestTime = 0;
+    isRestingActive = false;
+    showCard = false;
+    renderOverlay();
+
+    if (overlayHost) {
+      overlayHost.style.opacity = '0';
+
+      window.setTimeout(() => {
+        overlayRoot?.unmount();
+        overlayRoot = null;
+        overlayHost?.remove();
+        overlayHost = null;
+      }, 800);
     }
   };
 
-  // UI 更新：进入休息状态
   const startRestUI = (timeLeft: number) => {
-    const btnRest = document.getElementById('tl-btn-rest');
-    const btnExtend = document.getElementById('tl-btn-extend');
-    
-    if (btnRest) {
-      btnRest.style.opacity = '0.7';
-      btnRest.style.cursor = 'not-allowed';
-      // 移除原有的悬停变色事件（简单处理，直接改背景）
-      btnRest.style.backgroundColor = '#10B981'; 
-    }
-    
-    if (btnExtend) {
-      btnExtend.style.opacity = '0.5';
-      btnExtend.style.pointerEvents = 'none';
-    }
+    remainingRestTime = timeLeft;
+    isRestPaused = false;
+    isRestingActive = true;
+    showCard = true;
+    renderOverlay();
 
     if (restTimer) clearInterval(restTimer);
 
-    let currentLeft = timeLeft;
-    
-    const updateBtnText = () => {
-      if (btnRest) {
-        const m = Math.floor(currentLeft / 60);
-        const s = (currentLeft % 60).toString().padStart(2, '0');
-        btnRest.innerText = `休息中... (${m}:${s})`;
-      }
-    };
-
-    updateBtnText();
-
     restTimer = window.setInterval(() => {
-      currentLeft--;
-      updateBtnText();
+      if (!isRestPaused) {
+        remainingRestTime--;
+        renderOverlay();
 
-      if (currentLeft <= 0) {
-        if (restTimer) clearInterval(restTimer);
-        removeOverlay();
-        // 倒计时结束，通知后台
-        chrome.runtime.sendMessage({ action: 'REST_COMPLETED', type: currentInterventionType });
+        if (remainingRestTime <= 0) {
+          if (restTimer) clearInterval(restTimer);
+          removeOverlay();
+          chrome.runtime.sendMessage({ action: 'REST_COMPLETED', type: currentInterventionType });
+        }
       }
     }, 1000);
   };
 
-  // 处理休息按钮点击
-  const handleRest = () => {
-    // 立即向后台发送开始休息的信号
-    chrome.runtime.sendMessage({ action: 'START_REST', type: currentInterventionType }, (response) => {
-      if (response && response.status === 'rest_started') {
-        // 如果是单站干预，自己负责倒计时
-        if (currentInterventionType === 'domain') {
-          startRestUI(300);
-        }
-        // 如果是全局，后台会广播 SYNC_REST_TIMER 消息，这里就不重复开始了
-      }
+  function handleTogglePauseRest() {
+    isRestPaused = !isRestPaused;
+    renderOverlay();
+
+    chrome.runtime.sendMessage({
+      action: 'TOGGLE_PAUSE_REST',
+      isPaused: isRestPaused,
+      type: currentInterventionType
     });
-  };
+  }
 
-  // 处理延长按钮点击
-  const handleExtend = () => {
+  function handleRest() {
+    chrome.runtime.sendMessage(
+      { action: 'START_REST', type: currentInterventionType },
+      (response) => {
+        if (response && response.status === 'rest_started') {
+          startRestUI(REST_DURATION_SECONDS);
+        }
+      }
+    );
+  }
+
+  function handleExtend(minutes: number) {
     removeOverlay();
-    // 通知后台延长了时间
-    chrome.runtime.sendMessage({ action: 'EXTEND_TIME', minutes: 30, type: currentInterventionType });
-  };
+    chrome.runtime.sendMessage({ action: 'EXTEND_TIME', minutes, type: currentInterventionType });
+  }
 
-  // 监听来自后台的指令
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'BLUR_PAGE') {
+  chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+    if (request.action === 'PRE_BLUR_WARNING') {
+      console.log('[TimeLens Content] Pre-blur warning received, starting 10s transition');
+      createPreBlurOverlay();
+      sendResponse({ status: 'pre_blur_started' });
+    } else if (request.action === 'BLUR_PAGE') {
       console.log(`[TimeLens Content] Received BLUR_PAGE (${request.type}) instruction`);
       createOverlay(request.message, request.type);
       sendResponse({ status: 'blurred' });
@@ -196,16 +283,33 @@ if (!(window as any).__TIMELENS_INJECTED) {
       removeOverlay();
       sendResponse({ status: 'cleared' });
     } else if (request.action === 'REST_IN_PROGRESS') {
-      // 当页面被刷新或新开时，如果正处于休息中，直接显示遮罩并同步剩余时间
       console.log(`[TimeLens Content] Resuming rest state: ${request.timeLeft}s left`);
-      const msg = request.type === 'global' ? '全局休息中...请让眼睛离开屏幕。' : '休息时间还没结束，请继续远离屏幕。';
+      const msg =
+        request.type === 'global'
+          ? '全局休息中...请让眼睛离开屏幕。'
+          : '休息时间还没结束，请继续远离屏幕。';
       createOverlay(msg, request.type);
       startRestUI(request.timeLeft);
       sendResponse({ status: 'rest_resumed' });
     } else if (request.action === 'SYNC_REST_TIMER') {
-      // 收到全局倒计时同步指令
-      console.log(`[TimeLens Content] Syncing global rest timer: ${request.timeLeft}s`);
-      startRestUI(request.timeLeft);
+      console.log(
+        `[TimeLens Content] Syncing global rest timer: ${request.timeLeft}s, paused: ${request.isPaused}`
+      );
+
+      if (overlayHost) {
+        isRestingActive = true;
+
+        if (request.isPaused !== undefined) {
+          isRestPaused = request.isPaused;
+        }
+
+        if (typeof request.timeLeft === 'number' && (!isRestPaused || request.isPaused !== undefined)) {
+          remainingRestTime = request.timeLeft;
+        }
+
+        renderOverlay();
+      }
+
       sendResponse({ status: 'timer_synced' });
     }
     return true;

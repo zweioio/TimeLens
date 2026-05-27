@@ -1,4 +1,5 @@
 import { VisitLog } from '../types';
+import { getDateKey } from '../lib/date';
 import { TagDatabase } from './tags';
 
 export class StorageManager {
@@ -8,8 +9,7 @@ export class StorageManager {
    * 获取今天的日期字符串 (格式: YYYY-MM-DD)
    */
   private static getTodayString(): string {
-    const today = new Date();
-    return today.toISOString().split('T')[0];
+    return getDateKey();
   }
 
   /**

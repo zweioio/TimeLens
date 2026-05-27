@@ -7,7 +7,8 @@
     "tabs",
     "storage",
     "scripting",
-    "alarms"
+    "alarms",
+    "sidePanel"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -24,8 +25,10 @@
     }
   ],
   "action": {
-    "default_popup": "src/popup/popup.html",
-    "default_title": "TimeLens 概览"
+    "default_title": "打开 TimeLens 侧边栏"
+  },
+  "side_panel": {
+    "default_path": "src/popup/popup.html"
   },
   "options_page": "src/dashboard/dashboard.html",
   "icons": {
